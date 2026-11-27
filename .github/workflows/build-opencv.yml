@@ -1,4 +1,4 @@
-name: Build OpenCV
+name: Build OpenCV Cross Platform
 run-name: Build OpenCV ${{ inputs.opencv_version }} - ${{ inputs.target_platform }}${{ inputs.enable_contrib && ' +contrib' || '' }}${{ inputs.enable_jasper && ' +jasper' || '' }}${{ inputs.enable_cuda && ' +cuda' || '' }}${{ inputs.variant_tag != '' && format(' ({0})', inputs.variant_tag) || '' }}
 
 on:

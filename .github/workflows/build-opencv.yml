@@ -1,13 +1,13 @@
-name: Build Qt Cross Platform
-run-name: Build Qt ${{ inputs.qt_version }} - ${{ inputs.target_platform }}${{ inputs.variant_tag != '' && format(' ({0})', inputs.variant_tag) || '' }}
+name: Build OpenCV Cross Platform
+run-name: Build OpenCV ${{ inputs.opencv_version }} - ${{ inputs.target_platform }}${{ inputs.variant_tag != '' && format(' ({0})', inputs.variant_tag) || '' }}
 
 on:
   workflow_dispatch:
     inputs:
-      qt_version:
-        description: 'Qt version to build (e.g., 6.12.1)'
+      opencv_version:
+        description: 'OpenCV version to build (e.g., 4.14.0)'
         required: true
-        default: '6.12.1'
+        default: '4.14.0'
       target_platform:
         description: 'Target platform (OS - Arch)'
         type: choice
@@ -57,7 +57,7 @@ jobs:
           PLATFORM="${{ inputs.target_platform }}"
           OS_DIR="${PLATFORM%-*}"
           ARCH_DIR="${PLATFORM#*-}"
-          VER="${{ inputs.qt_version }}"
+          VER="${{ inputs.opencv_version }}"
 
           SUFFIX="${OS_DIR}-${ARCH_DIR}"
           if [ -n "${{ inputs.variant_tag }}" ]; then
@@ -65,7 +65,7 @@ jobs:
             SUFFIX="${SUFFIX}-${CLEAN_TAG}"
           fi
 
-          PKG_NAME="libqt_${VER}"
+          PKG_NAME="libopencv_${VER}"
           ZIP_NAME="${PKG_NAME}-${SUFFIX}.zip"
 
           echo "Target: OS=$OS_DIR \vert{} ARCH=$ARCH_DIR"
@@ -86,14 +86,10 @@ jobs:
           fi
           export DEBIAN_FRONTEND=noninteractive
           $SUDO apt-get update &&$SUDO apt-get install -y \
-            build-essential python3-pip curl xz-utils pkg-config \
-            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libfontconfig1-dev libfreetype-dev libx11-dev libx11-xcb-dev \
-            libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev \
-            libxcb-cursor-dev libxcb-glx0-dev libxcb-icccm4-dev libxcb-image0-dev \
-            libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev \
-            libxcb-shape0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xfixes0-dev \
-            libxcb-xkb-dev libdbus-1-dev libglib2.0-dev
+            build-essential python3-pip curl pkg-config \
+            libgtk-3-dev libavcodec-dev libavformat-dev libswscale-dev \
+            libjpeg-dev libpng-dev libtiff-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           pip3 install --upgrade cmake ninja || pip3 install --break-system-packages --upgrade cmake ninja
 
       - name: 3. Setup MSVC (Windows)
@@ -111,16 +107,16 @@ jobs:
             brew install ninja
           fi
 
-      - name: 5. Download qtbase ${{ inputs.qt_version }} source
+      - name: 5. Download OpenCV & opencv_contrib ${{ inputs.opencv_version }} sources
         shell: bash
         run: |
-          VER="${{ inputs.qt_version }}"
-          MINOR="${VER%.*}"
-          URL_OFFICIAL="https://download.qt.io/official_releases/qt/${MINOR}/${VER}/submodules/qtbase-everywhere-src-${VER}.tar.xz"
-          URL_ARCHIVE="https://download.qt.io/archive/qt/${MINOR}/${VER}/submodules/qtbase-everywhere-src-${VER}.tar.xz"
-          curl -fL -o qtbase.tar.xz "$URL_OFFICIAL" || curl -fL -o qtbase.tar.xz "$URL_ARCHIVE"
-          tar -xf qtbase.tar.xz
-          mv "qtbase-everywhere-src-${VER}" qtbase-src
+          VER="${{ inputs.opencv_version }}"
+          mkdir -p opencv-src opencv_contrib-src
+          curl -fL -o opencv.tar.gz "https://github.com/opencv/opencv/archive/${VER}.tar.gz"
+          tar -xzf opencv.tar.gz -C opencv-src --strip-components=1
+
+          curl -fL -o opencv_contrib.tar.gz "https://github.com/opencv/opencv_contrib/archive/${VER}.tar.gz"
+          tar -xzf opencv_contrib.tar.gz -C opencv_contrib-src --strip-components=1
 
       - name: 6. Configure, Build & Install
         shell: bash
@@ -137,12 +133,19 @@ jobs:
             fi
           fi
 
-          cmake -S qtbase-src -B build -G Ninja \
+          cmake -S opencv-src -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
+            -DOPENCV_EXTRA_MODULES_PATH="$PWD/opencv_contrib-src/modules" \
             -DBUILD_SHARED_LIBS=ON \
-            -DQT_BUILD_TESTS=OFF \
-            -DQT_BUILD_EXAMPLES=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_PERF_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_opencv_apps=OFF \
+            -DBUILD_opencv_python2=OFF \
+            -DBUILD_opencv_python3=OFF \
+            -DBUILD_JAVA=OFF \
             $EXTRA_FLAGS
 
           cmake --build build --parallel
@@ -246,7 +249,7 @@ jobs:
         shell: bash
         run: |
           PKG_NAME="${{ steps.meta.outputs.pkg_name }}"
-          VER="${{ inputs.qt_version }}"
+          VER="${{ inputs.opencv_version }}"
 
           python3 - "$PKG_NAME" "$VER" << 'PYEOF'
           import sys, textwrap
@@ -260,50 +263,50 @@ jobs:
               cmake_minimum_required(VERSION 3.21)
 
               if(WIN32)
-                  set(_QT_OS "Win11")
+                  set(_CV_OS "Win11")
               elseif(APPLE)
-                  set(_QT_OS "MacOS")
+                  set(_CV_OS "MacOS")
               elseif(UNIX)
                   if(EXISTS "/etc/os-release")
                       file(READ "/etc/os-release" _OS_RELEASE)
                       string(REGEX MATCH "VERSION_ID=\\"([0-9]+\\\\.[0-9]+)\\"" _MATCH "${_OS_RELEASE}")
                       if(CMAKE_MATCH_1)
-                          set(_QT_OS "Ubuntu${CMAKE_MATCH_1}")
+                          set(_CV_OS "Ubuntu${CMAKE_MATCH_1}")
                       else()
-                          set(_QT_OS "Linux")
+                          set(_CV_OS "Linux")
                       endif()
                   else()
-                      set(_QT_OS "Linux")
+                      set(_CV_OS "Linux")
                   endif()
               else()
-                  message(FATAL_ERROR "[Qt] Unsupported OS: ${CMAKE_SYSTEM_NAME}")
+                  message(FATAL_ERROR "[OpenCV] Unsupported OS: ${CMAKE_SYSTEM_NAME}")
               endif()
 
               string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _PROC_LOWER)
               if(_PROC_LOWER MATCHES "aarch64|arm64")
-                  set(_QT_ARCH "arm64")
+                  set(_CV_ARCH "arm64")
               elseif(_PROC_LOWER MATCHES "x86_64|amd64|x64")
-                  set(_QT_ARCH "amd64")
+                  set(_CV_ARCH "amd64")
               else()
-                  message(FATAL_ERROR "[Qt] Unsupported CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+                  message(FATAL_ERROR "[OpenCV] Unsupported CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
               endif()
 
-              set(_QT_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${_QT_OS}/${_QT_ARCH}")
-              if(NOT EXISTS "${_QT_TARGET_DIR}")
-                  message(FATAL_ERROR "[Qt] Prebuilt Qt not found for ${_QT_OS}/${_QT_ARCH} at:${_QT_TARGET_DIR}")
+              set(_CV_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${_CV_OS}/${_CV_ARCH}")
+              if(NOT EXISTS "${_CV_TARGET_DIR}")
+                  message(FATAL_ERROR "[OpenCV] Prebuilt OpenCV not found for ${_CV_OS}/${_CV_ARCH} at:${_CV_TARGET_DIR}")
               endif()
 
-              message(STATUS "[Qt] Using prebuilt package for: ${_QT_OS}/${_QT_ARCH}")
+              message(STATUS "[OpenCV] Using prebuilt package for: ${_CV_OS}/${_CV_ARCH}")
 
-              set(_NEW_PREFIX_PATH "${_QT_TARGET_DIR};${CMAKE_PREFIX_PATH}")
+              set(_NEW_PREFIX_PATH "${_CV_TARGET_DIR};${CMAKE_PREFIX_PATH}")
               set(CMAKE_PREFIX_PATH "${_NEW_PREFIX_PATH}" PARENT_SCOPE)
-              set(LIBQT_DIR "${_QT_TARGET_DIR}" PARENT_SCOPE)
+              set(LIBOPENCV_DIR "${_CV_TARGET_DIR}" PARENT_SCOPE)
           """), encoding="utf-8")
 
           (pkg_dir / "README.md").write_text(textwrap.dedent(f"""\
-              # Prebuilt Qt {ver} (`{pkg_name}`)
+              # Prebuilt OpenCV {ver} (`{pkg_name}`)
 
-              Prebuilt Qt ({ver}) binaries structured for cross-platform CMake projects.
+              Prebuilt OpenCV ({ver} with `opencv_contrib`) binaries structured for cross-platform CMake projects.
 
               ## Directory Structure
 
@@ -313,10 +316,9 @@ jobs:
               ├── README.md            # Integration and setup guide
               ├── install_deps.sh      # Runtime dependency installer (Linux/Ubuntu builds only)
               └── <OS>/<Arch>/
-                  ├── bin/
                   ├── include/
-                  ├── lib/
-                  └── plugins/
+                  ├── lib/ (or x64/vc*/lib on Windows)
+                  └── bin/ (or x64/vc*/bin on Windows)
               ```
 
               Multiple platform archives (e.g., `Win11-amd64`, `Ubuntu22.04-arm64`) can be extracted into the same `{pkg_name}/` root directory side by side.
@@ -324,18 +326,18 @@ jobs:
               ## CMake Integration
 
               1. Extract this archive into your project's third-party directory (e.g., `ThirdParty/{pkg_name}`).
-              2. Add the subdirectory before calling `find_package(Qt6 ...)` in your root `CMakeLists.txt`:
+              2. Add the subdirectory before calling `find_package(OpenCV ...)` in your root `CMakeLists.txt`:
 
               ```cmake
               add_subdirectory(ThirdParty/{pkg_name})
-              find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+              find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui)
               ```
 
-              The included `CMakeLists.txt` automatically resolves the matching `<OS>/<Arch>` path, appends it to `CMAKE_PREFIX_PATH`, and exposes `LIBQT_DIR`.
+              The included `CMakeLists.txt` automatically resolves the matching `<OS>/<Arch>` path, appends it to `CMAKE_PREFIX_PATH`, and exposes `LIBOPENCV_DIR`.
 
               ## Linux / Ubuntu Target Setup (Including NVIDIA Jetson)
 
-              On clean Ubuntu or Jetson environments, required X11/XCB/OpenGL runtime libraries may not be pre-installed. Run the bundled helper script from the package root before launching your application:
+              On clean Ubuntu or Jetson environments, required GTK, FFmpeg, GStreamer, or image codec runtime libraries may not be pre-installed. Run the bundled helper script from the package root before launching your application:
 
               ```bash
               chmod +x install_deps.sh
@@ -355,7 +357,7 @@ jobs:
       - name: 10. Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.qt_version }}
-          name: Qt ${{ inputs.qt_version }}
+          tag_name: v${{ inputs.opencv_version }}
+          name: OpenCV ${{ inputs.opencv_version }}
           draft: false
           files: ${{ steps.meta.outputs.zip_name }}

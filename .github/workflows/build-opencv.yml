@@ -1,13 +1,13 @@
-name: Build OpenCV Cross Platform
-run-name: Build OpenCV ${{ inputs.opencv_version }} - ${{ inputs.target_platform }}${{ inputs.variant_tag != '' && format(' ({0})', inputs.variant_tag) || '' }}
+name: Build Qt Cross Platform
+run-name: Build Qt ${{ inputs.qt_version }} - ${{ inputs.target_platform }}${{ inputs.variant_tag != '' && format(' ({0})', inputs.variant_tag) || '' }}
 
 on:
   workflow_dispatch:
     inputs:
-      opencv_version:
-        description: 'OpenCV version to build (e.g., 4.14.0)'
+      qt_version:
+        description: 'Qt version to build (e.g., 6.12.1)'
         required: true
-        default: '4.14.0'
+        default: '6.12.1'
       target_platform:
         description: 'Target platform (OS - Arch)'
         type: choice
@@ -50,18 +50,34 @@ jobs:
     container: ${{ inputs.target_platform == 'Ubuntu22.04-arm64' && 'ubuntu:22.04' || null }}
 
     steps:
-      - name: 1. Parse OS & Arch
-        id: platform
+      - name: 1. Parse OS, Arch & set Release naming
+        id: meta
         shell: bash
         run: |
           PLATFORM="${{ inputs.target_platform }}"
           OS_DIR="${PLATFORM%-*}"
           ARCH_DIR="${PLATFORM#*-}"
+          VER="${{ inputs.qt_version }}"
+
+          SUFFIX="${OS_DIR}-${ARCH_DIR}"
+          if [ -n "${{ inputs.variant_tag }}" ]; then
+            CLEAN_TAG=$(echo "${{ inputs.variant_tag }}" | tr -cd 'a-zA-Z0-9_-')
+            SUFFIX="${SUFFIX}-${CLEAN_TAG}"
+          fi
+
+          PKG_NAME="libqt_${VER}"
+          ZIP_NAME="${PKG_NAME}-${SUFFIX}.zip"
+
+          echo "Target: OS=$OS_DIR \vert{} ARCH=$ARCH_DIR"
+          echo "Output ZIP: $ZIP_NAME"
+
           echo "os_dir=$OS_DIR" >> $GITHUB_OUTPUT
           echo "arch_dir=$ARCH_DIR" >> $GITHUB_OUTPUT
+          echo "pkg_name=$PKG_NAME" >> $GITHUB_OUTPUT
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
 
       - name: 2. Install system build dependencies (Ubuntu / Container)
-        if: startsWith(steps.platform.outputs.os_dir, 'Ubuntu')
+        if: startsWith(steps.meta.outputs.os_dir, 'Ubuntu')
         shell: bash
         run: |
           SUDO=""
@@ -70,114 +86,74 @@ jobs:
           fi
           export DEBIAN_FRONTEND=noninteractive
           $SUDO apt-get update &&$SUDO apt-get install -y \
-            build-essential python3-pip curl pkg-config \
-            libgtk-3-dev libavcodec-dev libavformat-dev libswscale-dev \
-            libjpeg-dev libpng-dev libtiff-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+            build-essential python3-pip curl xz-utils pkg-config \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig1-dev libfreetype-dev libx11-dev libx11-xcb-dev \
+            libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev \
+            libxcb-cursor-dev libxcb-glx0-dev libxcb-icccm4-dev libxcb-image0-dev \
+            libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev \
+            libxcb-shape0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xfixes0-dev \
+            libxcb-xkb-dev libdbus-1-dev libglib2.0-dev
           pip3 install --upgrade cmake ninja || pip3 install --break-system-packages --upgrade cmake ninja
 
       - name: 3. Setup MSVC (Windows)
-        if: startsWith(steps.platform.outputs.os_dir, 'Win')
+        if: startsWith(steps.meta.outputs.os_dir, 'Win')
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ steps.platform.outputs.arch_dir == 'amd64' && 'x64' || 'arm64' }}
+          arch: ${{ steps.meta.outputs.arch_dir == 'amd64' && 'x64' || 'arm64' }}
 
       - name: 4. Ensure Ninja is available (Windows / macOS)
         shell: bash
         run: |
-          if [[ "${{ steps.platform.outputs.os_dir }}" == Win* ]]; then
+          if [[ "${{ steps.meta.outputs.os_dir }}" == Win* ]]; then
             command -v ninja >/dev/null 2>&1 || choco install ninja -y
-          elif [ "${{ steps.platform.outputs.os_dir }}" = "MacOS" ]; then
+          elif [ "${{ steps.meta.outputs.os_dir }}" = "MacOS" ]; then
             brew install ninja
           fi
 
-      - name: 5. Detect Compiler & set Release naming
-        id: meta
+      - name: 5. Download qtbase ${{ inputs.qt_version }} source
         shell: bash
         run: |
-          OS_DIR="${{ steps.platform.outputs.os_dir }}"
-          ARCH_DIR="${{ steps.platform.outputs.arch_dir }}"
-          VER="${{ inputs.opencv_version }}"
+          VER="${{ inputs.qt_version }}"
+          MINOR="${VER%.*}"
+          URL_OFFICIAL="https://download.qt.io/official_releases/qt/${MINOR}/${VER}/submodules/qtbase-everywhere-src-${VER}.tar.xz"
+          URL_ARCHIVE="https://download.qt.io/archive/qt/${MINOR}/${VER}/submodules/qtbase-everywhere-src-${VER}.tar.xz"
+          curl -fL -o qtbase.tar.xz "$URL_OFFICIAL" || curl -fL -o qtbase.tar.xz "$URL_ARCHIVE"
+          tar -xf qtbase.tar.xz
+          mv "qtbase-everywhere-src-${VER}" qtbase-src
 
-          if [[ "$OS_DIR" == Win* ]]; then
-            CL_VER=$(cl 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
-            CL_MINOR=$(echo "$CL_VER" | cut -d. -f2)
-            if [ -n "$CL_MINOR" ] && [ "$CL_MINOR" -ge 50 ]; then
-              COMPILER="msvc2026"
-            else
-              COMPILER="msvc2022"
-            fi
-          elif [[ "$OS_DIR" == Ubuntu* ]]; then
-            GCC_MAJOR=$(g++ -dumpversion | cut -d. -f1)
-            COMPILER="gcc${GCC_MAJOR}"
-          elif [ "$OS_DIR" = "MacOS" ]; then
-            COMPILER="clang"
-          else
-            COMPILER="unknown"
-          fi
-
-          SUFFIX="${OS_DIR}-${ARCH_DIR}-${COMPILER}"
-          if [ -n "${{ inputs.variant_tag }}" ]; then
-            CLEAN_TAG=$(echo "${{ inputs.variant_tag }}" | tr -cd 'a-zA-Z0-9_-')
-            SUFFIX="${SUFFIX}-${CLEAN_TAG}"
-          fi
-
-          PKG_NAME="libopencv_${VER}"
-          ZIP_NAME="${PKG_NAME}-${SUFFIX}.zip"
-
-          echo "Detected: OS=$OS_DIR | ARCH=$ARCH_DIR \vert{} COMPILER=$COMPILER"
-          echo "Output ZIP: $ZIP_NAME"
-
-          echo "compiler=$COMPILER" >> $GITHUB_OUTPUT
-          echo "pkg_name=$PKG_NAME" >> $GITHUB_OUTPUT
-          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
-
-      - name: 6. Download OpenCV ${{ inputs.opencv_version }} source
-        shell: bash
-        run: |
-          VER="${{ inputs.opencv_version }}"
-          mkdir -p opencv-src
-          curl -fL -o opencv.tar.gz "https://github.com/opencv/opencv/archive/${VER}.tar.gz"
-          tar -xzf opencv.tar.gz -C opencv-src --strip-components=1
-
-      - name: 7. Configure, Build & Install
+      - name: 6. Configure, Build & Install
         shell: bash
         run: |
           PKG_DIR="$PWD/dist/${{ steps.meta.outputs.pkg_name }}"
-          INSTALL_DIR="${PKG_DIR}/${{ steps.platform.outputs.os_dir }}/${{ steps.platform.outputs.arch_dir }}/${{ steps.meta.outputs.compiler }}"
+          INSTALL_DIR="${PKG_DIR}/${{ steps.meta.outputs.os_dir }}/${{ steps.meta.outputs.arch_dir }}"
           EXTRA_FLAGS="${{ inputs.custom_cmake_flags }}"
 
-          if [ "${{ steps.platform.outputs.os_dir }}" = "MacOS" ]; then
-            if [ "${{ steps.platform.outputs.arch_dir }}" = "amd64" ]; then
+          if [ "${{ steps.meta.outputs.os_dir }}" = "MacOS" ]; then
+            if [ "${{ steps.meta.outputs.arch_dir }}" = "amd64" ]; then
               EXTRA_FLAGS="$EXTRA_FLAGS -DCMAKE_OSX_ARCHITECTURES=x86_64"
             else
               EXTRA_FLAGS="$EXTRA_FLAGS -DCMAKE_OSX_ARCHITECTURES=arm64"
             fi
           fi
 
-          cmake -S opencv-src -B build -G Ninja \
+          cmake -S qtbase-src -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
             -DBUILD_SHARED_LIBS=ON \
-            -DBUILD_TESTS=OFF \
-            -DBUILD_PERF_TESTS=OFF \
-            -DBUILD_EXAMPLES=OFF \
-            -DBUILD_DOCS=OFF \
-            -DBUILD_opencv_apps=OFF \
-            -DBUILD_opencv_python2=OFF \
-            -DBUILD_opencv_python3=OFF \
-            -DBUILD_JAVA=OFF \
+            -DQT_BUILD_TESTS=OFF \
+            -DQT_BUILD_EXAMPLES=OFF \
             $EXTRA_FLAGS
 
           cmake --build build --parallel
           cmake --install build
 
-      - name: 8. Export runtime dependencies & root install_deps.sh (Ubuntu)
-        if: startsWith(steps.platform.outputs.os_dir, 'Ubuntu')
+      - name: 7. Export runtime dependencies & root install_deps.sh (Ubuntu)
+        if: startsWith(steps.meta.outputs.os_dir, 'Ubuntu')
         shell: bash
         run: |
           PKG_DIR="$PWD/dist/${{ steps.meta.outputs.pkg_name }}"
-          INSTALL_DIR="${PKG_DIR}/${{ steps.platform.outputs.os_dir }}/${{ steps.platform.outputs.arch_dir }}/${{ steps.meta.outputs.compiler }}"
+          INSTALL_DIR="${PKG_DIR}/${{ steps.meta.outputs.os_dir }}/${{ steps.meta.outputs.arch_dir }}"
 
           python3 - "$PKG_DIR" "$INSTALL_DIR" << 'PYEOF'
           import os, subprocess, sys, textwrap
@@ -246,19 +222,9 @@ jobs:
                       ;;
               esac
 
-              DEPS_FILE=""
-              if command -v g++ >/dev/null 2>&1; then
-                  GCC_MAJOR="$(g++ -dumpversion | cut -d. -f1)"
-                  CANDIDATE="$SCRIPT_DIR/$OS_DIR/$ARCH_DIR/gcc${GCC_MAJOR}/apt-runtime-deps.txt"
-                  [ -f "$CANDIDATE" ] && DEPS_FILE="$CANDIDATE"
-              fi
-
-              if [ -z "$DEPS_FILE" ]; then
-                  DEPS_FILE="$(find "$SCRIPT_DIR/$OS_DIR/$ARCH_DIR" -maxdepth 2 -name "apt-runtime-deps.txt" 2>/dev/null | head -n1)"
-              fi
-
-              if [ -z "$DEPS_FILE" ] \vert{}\vert{} [ ! -f "$DEPS_FILE" ]; then
-                  echo "[Error] No runtime dependency list found for $OS_DIR/$ARCH_DIR under$SCRIPT_DIR"
+              DEPS_FILE="$SCRIPT_DIR/$OS_DIR/$ARCH_DIR/apt-runtime-deps.txt"
+              if [ ! -f "$DEPS_FILE" ]; then
+                  echo "[Error] No runtime dependency list found for $OS_DIR/$ARCH_DIR at:$DEPS_FILE"
                   exit 1
               fi
 
@@ -276,11 +242,11 @@ jobs:
           install_sh.chmod(0o755)
           PYEOF
 
-      - name: 9. Generate root CMakeLists.txt & README.md
+      - name: 8. Generate root CMakeLists.txt & README.md
         shell: bash
         run: |
           PKG_NAME="${{ steps.meta.outputs.pkg_name }}"
-          VER="${{ inputs.opencv_version }}"
+          VER="${{ inputs.qt_version }}"
 
           python3 - "$PKG_NAME" "$VER" << 'PYEOF'
           import sys, textwrap
@@ -294,116 +260,102 @@ jobs:
               cmake_minimum_required(VERSION 3.21)
 
               if(WIN32)
-                  set(_CV_OS "Win11")
+                  set(_QT_OS "Win11")
               elseif(APPLE)
-                  set(_CV_OS "MacOS")
+                  set(_QT_OS "MacOS")
               elseif(UNIX)
                   if(EXISTS "/etc/os-release")
                       file(READ "/etc/os-release" _OS_RELEASE)
                       string(REGEX MATCH "VERSION_ID=\\"([0-9]+\\\\.[0-9]+)\\"" _MATCH "${_OS_RELEASE}")
                       if(CMAKE_MATCH_1)
-                          set(_CV_OS "Ubuntu${CMAKE_MATCH_1}")
+                          set(_QT_OS "Ubuntu${CMAKE_MATCH_1}")
                       else()
-                          set(_CV_OS "Linux")
+                          set(_QT_OS "Linux")
                       endif()
                   else()
-                      set(_CV_OS "Linux")
+                      set(_QT_OS "Linux")
                   endif()
               else()
-                  message(FATAL_ERROR "[OpenCV] Unsupported OS: ${CMAKE_SYSTEM_NAME}")
+                  message(FATAL_ERROR "[Qt] Unsupported OS: ${CMAKE_SYSTEM_NAME}")
               endif()
 
               string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _PROC_LOWER)
               if(_PROC_LOWER MATCHES "aarch64|arm64")
-                  set(_CV_ARCH "arm64")
+                  set(_QT_ARCH "arm64")
               elseif(_PROC_LOWER MATCHES "x86_64|amd64|x64")
-                  set(_CV_ARCH "amd64")
+                  set(_QT_ARCH "amd64")
               else()
-                  message(FATAL_ERROR "[OpenCV] Unsupported CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+                  message(FATAL_ERROR "[Qt] Unsupported CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
               endif()
 
-              if(MSVC)
-                  if(MSVC_VERSION GREATER_EQUAL 1950)
-                      set(_CV_COMPILER "msvc2026")
-                  else()
-                      set(_CV_COMPILER "msvc2022")
-                  endif()
-              elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-                  string(REGEX MATCH "^[0-9]+" _GCC_MAJOR "${CMAKE_CXX_COMPILER_VERSION}")
-                  set(_CV_COMPILER "gcc${_GCC_MAJOR}")
-              elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-                  set(_CV_COMPILER "clang")
-              else()
-                  message(FATAL_ERROR "[OpenCV] Unsupported compiler: ${CMAKE_CXX_COMPILER_ID}")
+              set(_QT_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${_QT_OS}/${_QT_ARCH}")
+              if(NOT EXISTS "${_QT_TARGET_DIR}")
+                  message(FATAL_ERROR "[Qt] Prebuilt Qt not found for ${_QT_OS}/${_QT_ARCH} at:${_QT_TARGET_DIR}")
               endif()
 
-              set(_CV_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${_CV_OS}/${_CV_ARCH}/${_CV_COMPILER}")
-              if(NOT EXISTS "${_CV_TARGET_DIR}")
-                  message(FATAL_ERROR "[OpenCV] Prebuilt OpenCV not found for ${_CV_OS}/${_CV_ARCH}/${_CV_COMPILER} at:${_CV_TARGET_DIR}")
-              endif()
+              message(STATUS "[Qt] Using prebuilt package for: ${_QT_OS}/${_QT_ARCH}")
 
-              message(STATUS "[OpenCV] Using prebuilt package for: ${_CV_OS}/${_CV_ARCH}/${_CV_COMPILER}")
-
-              set(_NEW_PREFIX_PATH "${_CV_TARGET_DIR};${CMAKE_PREFIX_PATH}")
+              set(_NEW_PREFIX_PATH "${_QT_TARGET_DIR};${CMAKE_PREFIX_PATH}")
               set(CMAKE_PREFIX_PATH "${_NEW_PREFIX_PATH}" PARENT_SCOPE)
-              set(LIBOPENCV_DIR "${_CV_TARGET_DIR}" PARENT_SCOPE)
+              set(LIBQT_DIR "${_QT_TARGET_DIR}" PARENT_SCOPE)
           """), encoding="utf-8")
 
           (pkg_dir / "README.md").write_text(textwrap.dedent(f"""\
-              # Prebuilt OpenCV {ver} (`{pkg_name}`)
+              # Prebuilt Qt {ver} (`{pkg_name}`)
 
-              Prebuilt OpenCV ({ver}) binaries structured for cross-platform CMake projects.
+              Prebuilt Qt ({ver}) binaries structured for cross-platform CMake projects.
 
               ## Directory Structure
 
               ```text
               {pkg_name}/
-              ├── CMakeLists.txt       # Auto-detects OS, architecture, and compiler
+              ├── CMakeLists.txt       # Auto-detects OS and architecture
               ├── README.md            # Integration and setup guide
               ├── install_deps.sh      # Runtime dependency installer (Linux/Ubuntu builds only)
-              └── <OS>/<Arch>/<Compiler>/
+              └── <OS>/<Arch>/
+                  ├── bin/
                   ├── include/
-                  ├── lib/ (or x64/vc*/lib on Windows)
-                  └── bin/ (or x64/vc*/bin on Windows)
+                  ├── lib/
+                  └── plugins/
               ```
 
-              Multiple platform archives (e.g., `Win11-amd64-msvc2026`, `Ubuntu22.04-arm64-gcc11`) can be extracted into the same `{pkg_name}/` root directory side by side.
+              Multiple platform archives (e.g., `Win11-amd64`, `Ubuntu22.04-arm64`) can be extracted into the same `{pkg_name}/` root directory side by side.
 
               ## CMake Integration
 
               1. Extract this archive into your project's third-party directory (e.g., `ThirdParty/{pkg_name}`).
-              2. Add the subdirectory before calling `find_package(OpenCV ...)` in your root `CMakeLists.txt`:
+              2. Add the subdirectory before calling `find_package(Qt6 ...)` in your root `CMakeLists.txt`:
 
               ```cmake
               add_subdirectory(ThirdParty/{pkg_name})
-              find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui)
+              find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
               ```
 
-              The included `CMakeLists.txt` automatically resolves the matching `<OS>/<Arch>/<Compiler>` path, appends it to `CMAKE_PREFIX_PATH`, and exposes `LIBOPENCV_DIR`.
+              The included `CMakeLists.txt` automatically resolves the matching `<OS>/<Arch>` path, appends it to `CMAKE_PREFIX_PATH`, and exposes `LIBQT_DIR`.
 
               ## Linux / Ubuntu Target Setup (Including NVIDIA Jetson)
 
-              On clean Ubuntu or Jetson environments, required GTK, FFmpeg, GStreamer, or image codec runtime libraries may not be pre-installed. Run the bundled helper script from the package root before launching your application:
+              On clean Ubuntu or Jetson environments, required X11/XCB/OpenGL runtime libraries may not be pre-installed. Run the bundled helper script from the package root before launching your application:
 
               ```bash
               chmod +x install_deps.sh
               ./install_deps.sh
               ```
 
-              This script detects the current Ubuntu version and architecture, reads `<OS>/<Arch>/<Compiler>/apt-runtime-deps.txt`, and installs only the required runtime packages via `apt-get`.
+              This script detects the current Ubuntu version and architecture, reads `<OS>/<Arch>/apt-runtime-deps.txt`, and installs only the required runtime packages via `apt-get`.
           """), encoding="utf-8")
           PYEOF
 
-      - name: 10. Package ZIP archive
+      - name: 9. Package ZIP archive
         shell: bash
         run: |
           cd dist
           cmake -E tar "cfv" "../${{ steps.meta.outputs.zip_name }}" --format=zip "${{ steps.meta.outputs.pkg_name }}"
 
-      - name: 11. Publish to GitHub Releases
+      - name: 10. Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.opencv_version }}
-          name: OpenCV ${{ inputs.opencv_version }}
+          tag_name: v${{ inputs.qt_version }}
+          name: Qt ${{ inputs.qt_version }}
           draft: false
           files: ${{ steps.meta.outputs.zip_name }}
